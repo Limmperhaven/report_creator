@@ -1,66 +1,81 @@
 package docx
 
 import (
-	"errors"
 	docxt "github.com/qida/go-docx-templates"
-	"github.com/spf13/viper"
+	"gitlab.digital-spirit.ru/tn-projs/dev-tools/reports/internal/utils"
+
 	"gitlab.digital-spirit.ru/tn-projs/dev-tools/reports/internal/client"
-	"strconv"
+	"gitlab.digital-spirit.ru/tn-projs/dev-tools/reports/internal/config"
 )
 
 type TemplateStruct struct {
-	Date       string
-	TotalHours string
-	Rows       []TemplateRow
+	Date        string
+	Initiator   string
+	ProjectCode string
+	TotalHours  string
+	Rows        []TemplateRow
 }
 
 type TemplateRow struct {
-	Date      string
-	Comment   string
-	Hours     string
-	Category  string
-	Initiator string
+	Date     string
+	Comment  string
+	Hours    string
+	Category string
 }
 
-func NewTemplateStruct(wds []client.WorkDay, categories, projects map[string]interface{}) (TemplateStruct, error) {
-	ts := TemplateStruct{Date: viper.GetString("timetta.settings.documentDate")}
+type UserComment struct {
+	UserId  string
+	Comment string
+}
 
-	var totalHrs int64 = 0
+func NewTemplateStruct(wds []client.WorkDay, cfg *config.Config, project config.Project) (TemplateStruct, error) {
+	ts := TemplateStruct{
+		Date:        cfg.Timetta.Settings.DocumentDate,
+		Initiator:   project.Initiator,
+		ProjectCode: project.Code,
+	}
+
+	var totalHrs float64 = 0
+	var wdsMap = make(map[UserComment]client.WorkDay)
 
 	for _, wd := range wds {
 		totalHrs += wd.Hours
+		mwd, ok := wdsMap[UserComment{wd.User.Id, wd.Comment}]
+		if ok {
+			wdsMap[UserComment{wd.User.Id, wd.Comment}] = client.WorkDay{
+				Date:      mwd.Date,
+				Hours:     wd.Hours + mwd.Hours,
+				Comment:   mwd.Comment,
+				User:      mwd.User,
+				ProjectId: mwd.ProjectId,
+			}
+		} else {
+			wdsMap[UserComment{wd.User.Id, wd.Comment}] = wd
+		}
+	}
 
-		category, exists := categories[wd.User.Fio]
+	for _, wd := range wdsMap {
+		emp, exists := cfg.EmployeeById[wd.User.Id]
 		if !exists {
-			category = "Разработка"
-		}
+			emp.Category = "Разработка"
 
-		cat, ok := category.(string)
-		if !ok {
-			return *new(TemplateStruct), errors.New("invalid category detected")
-		}
-
-		init, ok := projects[wd.ProjectId].(string)
-		if !ok {
-			return *new(TemplateStruct), errors.New("invalid initiator detected")
 		}
 
 		ts.Rows = append(ts.Rows, TemplateRow{
-			Date:      wd.Date,
-			Comment:   wd.User.Fio + ": " + wd.Comment,
-			Hours:     strconv.Itoa(int(wd.Hours)),
-			Category:  cat,
-			Initiator: init,
+			Date:     wd.Date,
+			Comment:  wd.User.Fio + ": " + wd.Comment,
+			Hours:    utils.FormatFloat64(wd.Hours),
+			Category: emp.Category,
 		})
 	}
 
-	ts.TotalHours = strconv.Itoa(int(totalHrs))
+	ts.TotalHours = utils.FormatFloat64(totalHrs)
 
 	return ts, nil
 }
 
-func (t *TemplateStruct) Generate(path string) error {
-	template, err := docxt.OpenTemplate("etc/template.docx")
+func (t *TemplateStruct) Generate(path, name string) error {
+	template, err := docxt.OpenTemplate("etc/template1.docx")
 	if err != nil {
 		return err
 	}
@@ -69,7 +84,15 @@ func (t *TemplateStruct) Generate(path string) error {
 		return err
 	}
 
-	if err := template.Save(path + "result.docx"); err != nil {
+	var savePath string
+
+	if path == "" {
+		savePath = name + ".docx"
+	} else {
+		savePath = path + "/" + name + ".docx"
+	}
+
+	if err := template.Save(savePath); err != nil {
 		return err
 	}
 

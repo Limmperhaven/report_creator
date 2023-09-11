@@ -1,17 +1,16 @@
 package domain
 
 import (
+	"fmt"
+	"log"
+
 	"gitlab.digital-spirit.ru/tn-projs/dev-tools/reports/internal/client"
 	"gitlab.digital-spirit.ru/tn-projs/dev-tools/reports/internal/config"
+	"gitlab.digital-spirit.ru/tn-projs/dev-tools/reports/internal/domain/csv"
 	"gitlab.digital-spirit.ru/tn-projs/dev-tools/reports/internal/domain/docx"
-	"log"
 )
 
-func GenerateReport(cl *client.TimettaClient, path string, config *config.Config) {
-	log.Println("Authorizing your account...")
-	if err := cl.Authorize(config.Timetta.Credentials.Email, config.Timetta.Credentials.Password); err != nil {
-		log.Fatalf("authorization error: %s", err.Error())
-	}
+func GenerateReport(cl *client.TimettaClient, config *config.Config) {
 
 	log.Println("Getting project members...")
 	members, err := cl.GetMembersByProjects(config.Projects)
@@ -44,15 +43,59 @@ func GenerateReport(cl *client.TimettaClient, path string, config *config.Config
 	}
 
 	log.Println("Processing collected info...")
-	ts, err := docx.NewTemplateStruct(allWorkDays, config.Categories, config.Projects)
-	if err != nil {
-		log.Fatalf("error creating template struct: %s", err.Error())
+	for _, project := range config.Projects {
+		projectWorkDays := make([]client.WorkDay, 0)
+
+		for _, wd := range allWorkDays {
+			if wd.ProjectId == project.Id {
+				projectWorkDays = append(projectWorkDays, wd)
+			}
+		}
+
+		//for _, pwd := range projectWorkDays {
+		//	if pwd.User.Id == "398c3d99-3261-4e54-94fa-5ce59420e3e4" {
+		//		fmt.Println(pwd.Comment, pwd.Hours)
+		//	}
+		//}
+
+		ts, err := docx.NewTemplateStruct(projectWorkDays, config, project)
+		if err != nil {
+			log.Fatalf("error creating template struct: %s", err.Error())
+		}
+
+		log.Printf("Generating document `%s`...\n", project.Name)
+		docName := fmt.Sprintf("Рабочий отчет_%s_%s", config.Timetta.Settings.DocumentDate[:7], project.Code)
+
+		if err := ts.Generate(config.Output, docName); err != nil {
+			log.Fatalf("error generating document: %s", err.Error())
+		}
 	}
 
-	log.Println("Generating document...")
-	if err := ts.Generate(path); err != nil {
-		log.Fatalf("error generating document: %s", err.Error())
+	log.Println("Generating csv...")
+	if err := csv.GenerateCSV(allWorkDays, config); err != nil {
+		log.Fatalf("error generating csv: %s", err.Error())
 	}
 
 	log.Println("Completed")
+}
+
+func PrintMembers(cl *client.TimettaClient, config *config.Config) {
+	log.Println("Getting project members...")
+	members, err := cl.GetMembersByProjects(config.Projects)
+	if err != nil {
+		log.Fatalf("error getting project members: %s", err.Error())
+	}
+
+	fmt.Print("\n\n\n")
+
+	for _, project := range config.Projects {
+		fmt.Printf("%s - %s - %s\n\n", project.Id, project.Name, project.Initiator)
+		for _, member := range members {
+			if member.ProjectID == project.Id && member.Id != "" && member.Fio != "" {
+				fmt.Printf("%s: %s\n", member.Fio, member.Id)
+			}
+		}
+
+		fmt.Print("\n\n")
+	}
 }

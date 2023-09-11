@@ -1,5 +1,10 @@
 .idea
+.bin
 
 etc/*.yaml
+etc/*.yml
 
-result.docx
+*.csv
+*.docx
+*.exe
+*_darwin

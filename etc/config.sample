@@ -6,9 +6,15 @@ timetta:
     dateFrom: "2022-04-01" #YYYY-MM-DD
     dateTo: "2022-04-30" #YYYY-MM-DD
     documentDate: "2022-18-05" #YYYY-MM-DD
+
+
 projects:
-  project_guid1: "client_name1"
-  project_guid2: "client_name2"
-categories:
-  Peter Parker: "Inventing bicycle"
-  John Cena: "Drinking cocktails"
+    - id: "project_guid1"
+      name: "proj_name1"
+      initiator: "initiator_name1"
+
+employees:
+    - id: "59150938-2700-4166-85dc-93225b20f01d"
+      fio: "Peter Parker"
+      category: "Reporter"
+      salary: 15

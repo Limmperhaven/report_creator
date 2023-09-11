@@ -3,10 +3,13 @@ package client
 import (
 	"errors"
 	"fmt"
-	"github.com/tidwall/gjson"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"strings"
+
+	"github.com/tidwall/gjson"
+
+	"gitlab.digital-spirit.ru/tn-projs/dev-tools/reports/internal/config"
 )
 
 type TimettaClient struct {
@@ -16,27 +19,28 @@ type TimettaClient struct {
 
 type WorkDay struct {
 	Date      string
-	Hours     int64
+	Hours     float64
 	Comment   string
-	User      Employee
+	User      Person
 	ProjectId string
 }
 
-type Employee struct {
-	Id  string
-	Fio string
+type Person struct {
+	Id        string
+	Fio       string
+	ProjectID string
 }
 
 type TimeSheet struct {
 	Id   string
-	User Employee
+	User Person
 }
 
-func NewTimettaClient() *TimettaClient {
-	return &TimettaClient{&http.Client{}, ""}
-}
+var timetta *TimettaClient
 
-func (c *TimettaClient) Authorize(email, password string) error {
+func InitTimettaClient(email, password string) error {
+	timetta = &TimettaClient{&http.Client{}, ""}
+
 	url := "https://auth.timetta.com/connect/token"
 	method := "POST"
 	payload := strings.NewReader("client_id=external&scope=all offline_access&grant_type=password&username=" + email +
@@ -45,38 +49,47 @@ func (c *TimettaClient) Authorize(email, password string) error {
 	req, err := http.NewRequest(method, url, payload)
 
 	if err != nil {
-		return errors.New(fmt.Sprintf("error creating request: %s", err.Error()))
+		return fmt.Errorf("error creating request: %s", err.Error())
 	}
 
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 
-	res, err := c.Client.Do(req)
+	res, err := timetta.Client.Do(req)
 	if err != nil {
-		return errors.New(fmt.Sprintf("error processing request: %s", err.Error()))
+		return fmt.Errorf("error processing request: %s", err.Error())
+	}
+
+	if res.StatusCode == 400 {
+		return errors.New("invalid email or password")
 	}
 
 	defer res.Body.Close()
 
-	body, err := ioutil.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
 	if err != nil {
-		return errors.New(fmt.Sprintf("error reading response: %s", err.Error()))
+		return fmt.Errorf("error reading response: %s", err.Error())
 	}
 
-	c.AccessToken = fmt.Sprintf("Bearer %s", gjson.Get(string(body), "access_token").String())
+	timetta.AccessToken = fmt.Sprintf("Bearer %s", gjson.Get(string(body), "access_token").String())
 	return nil
 }
 
-func (c *TimettaClient) GetMembersByProjects(projects map[string]interface{}) ([]Employee, error) {
-	result := make([]Employee, 0)
+func GistTimettaClient() *TimettaClient {
+	return timetta
+}
 
-	for k := range projects {
-		url := fmt.Sprintf("https://api.timetta.com/odata/Projects(%s)/ProjectTeamMembers?$expand=resource($select=name)", k)
+func (c *TimettaClient) GetMembersByProjects(projects []config.Project) ([]Person, error) {
+	result := make([]Person, 0)
+	membersMap := make(map[string]bool)
+
+	for _, project := range projects {
+		url := fmt.Sprintf("https://api.timetta.com/odata/Projects(%s)/ProjectTeamMembers?$expand=resource($select=name)", project.Id)
 		method := "GET"
 
 		req, err := http.NewRequest(method, url, nil)
 
 		if err != nil {
-			return nil, errors.New(fmt.Sprintf("error creating request: %s", err.Error()))
+			return nil, fmt.Errorf("error creating request: %s", err.Error())
 		}
 
 		req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
@@ -84,20 +97,30 @@ func (c *TimettaClient) GetMembersByProjects(projects map[string]interface{}) ([
 
 		res, err := c.Client.Do(req)
 		if err != nil {
-			return nil, errors.New(fmt.Sprintf("error processing request: %s", err.Error()))
+			return nil, fmt.Errorf("error processing request: %s", err.Error())
 		}
 
-		body, err := ioutil.ReadAll(res.Body)
+		body, err := io.ReadAll(res.Body)
 
 		if err != nil {
-			return nil, errors.New(fmt.Sprintf("error reading response: %s", err.Error()))
+			return nil, fmt.Errorf("error reading response: %s", err.Error())
 		}
 
 		members := gjson.Get(string(body), "value").Array()
 
 		for _, mem := range members {
 			obj := mem.Map()
-			result = append(result, Employee{Id: obj["resourceId"].String(), Fio: mem.Get("resource.name").String()})
+
+			_, exists := membersMap[obj["resourceId"].String()]
+
+			if !exists {
+				result = append(result, Person{
+					Id:        obj["resourceId"].String(),
+					Fio:       mem.Get("resource.name").String(),
+					ProjectID: project.Id,
+				})
+				membersMap[obj["resourceId"].String()] = true
+			}
 		}
 
 		res.Body.Close()
@@ -106,29 +129,29 @@ func (c *TimettaClient) GetMembersByProjects(projects map[string]interface{}) ([
 	return result, nil
 }
 
-func (c *TimettaClient) GetUserTimeSheets(user Employee, dateFrom, dateTo string) ([]TimeSheet, error) {
+func (c *TimettaClient) GetUserTimeSheets(user Person, dateFrom, dateTo string) ([]TimeSheet, error) {
 	url := "https://api.timetta.com/odata/TimeSheets?$filter=dateFrom%20ge%20" + dateFrom + "%20and%20dateTo%20le%20" + dateTo + "%20and%20userId%20eq%20" + user.Id
 	method := "GET"
 
 	req, err := http.NewRequest(method, url, nil)
 
 	if err != nil {
-		return nil, errors.New(fmt.Sprintf("error creating request: %s", err.Error()))
+		return nil, fmt.Errorf("error creating request: %s", err.Error())
 	}
 
 	req.Header.Add("Authorization", c.AccessToken)
 
 	res, err := c.Client.Do(req)
 	if err != nil {
-		return nil, errors.New(fmt.Sprintf("error processing request: %s", err.Error()))
+		return nil, fmt.Errorf("error processing request: %s", err.Error())
 	}
 
 	defer res.Body.Close()
 
-	body, err := ioutil.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
 
 	if err != nil {
-		return nil, errors.New(fmt.Sprintf("error reading response: %s", err.Error()))
+		return nil, fmt.Errorf("error reading response: %s", err.Error())
 	}
 
 	result := make([]TimeSheet, 0)
@@ -142,45 +165,53 @@ func (c *TimettaClient) GetUserTimeSheets(user Employee, dateFrom, dateTo string
 	return result, nil
 }
 
-func (c *TimettaClient) GetWorkDays(ts TimeSheet, projects map[string]interface{}) ([]WorkDay, error) {
+func (c *TimettaClient) GetWorkDays(ts TimeSheet, projects []config.Project) ([]WorkDay, error) {
 	result := make([]WorkDay, 0)
 
-	url := fmt.Sprintf("https://api.timetta.com/odata/TimeSheets(%s)?$expand=timeSheetLines($orderBy=orderNumber;$select=id,orderNumber,projectId,projectTaskId,activityId,roleId;$expand=timeAllocations($select=id,date,duration,comments)),approvalStatus($select=id,name),user($select=id,name)&$select=id,dateFrom,dateTo,rowVersion", ts.Id)
+	url := fmt.Sprintf("https://api.timetta.com/odata/TimeSheets(%s)?$expand=timeSheetLines($orderBy=orderNumber;$select=id,orderNumber,projectId,projectTaskId,activityId,roleId;$expand=timeAllocations($select=id,date,duration,comments)),state($select=id,name),user($select=id,name)&$select=id,dateFrom,dateTo,rowVersion", ts.Id)
 	method := "GET"
 
 	req, err := http.NewRequest(method, url, nil)
 
 	if err != nil {
-		return nil, errors.New(fmt.Sprintf("error creating request: %s", err.Error()))
+		return nil, fmt.Errorf("error creating request: %s", err.Error())
 	}
 
 	req.Header.Add("Authorization", c.AccessToken)
 
 	res, err := c.Client.Do(req)
 	if err != nil {
-		return nil, errors.New(fmt.Sprintf("error processing request: %s", err.Error()))
+		return nil, fmt.Errorf("error processing request: %s", err.Error())
 	}
 
 	defer res.Body.Close()
 
-	body, err := ioutil.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
 
 	if err != nil {
-		return nil, errors.New(fmt.Sprintf("error reading response: %s", err.Error()))
+		return nil, fmt.Errorf("error reading response: %s", err.Error())
 	}
 
-	for k := range projects {
-		timeAllocations := gjson.Get(string(body), fmt.Sprintf("timeSheetLines.#(projectId=%s).timeAllocations",
-			k)).Array()
+	state := gjson.Get(string(body), "state.name").String()
+	if state != "Согласовано" && state != "На согласовании" && state != "Черновик" {
+		return result, nil
+	}
 
-		for _, ta := range timeAllocations {
-			result = append(result, WorkDay{
-				Date:      ta.Get("date").String(),
-				Hours:     ta.Get("duration").Int(),
-				Comment:   ta.Get("comments").String(),
-				User:      ts.User,
-				ProjectId: k,
-			})
+	for _, project := range projects {
+		timeSheetLines := gjson.Get(string(body), fmt.Sprintf("timeSheetLines.#(projectId=%s)#",
+			project.Id)).Array()
+
+		for _, tsl := range timeSheetLines {
+			timeAllocations := tsl.Get("timeAllocations").Array()
+			for _, ta := range timeAllocations {
+				result = append(result, WorkDay{
+					Date:      ta.Get("date").String(),
+					Hours:     ta.Get("duration").Float(),
+					Comment:   ta.Get("comments").String(),
+					User:      ts.User,
+					ProjectId: project.Id,
+				})
+			}
 		}
 	}
 
